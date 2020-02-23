@@ -3,10 +3,11 @@ import sys
 import signal
 import threading
 import select
+from contextlib import closing
 
 
 def close_proxy(signal, frame):
-    print("Interruption.")
+    print("Proxy server stopped")
     sys.exit(0)
 
 # Where the blocked sites are stored:
@@ -16,9 +17,9 @@ current_conns = 0  # currently established connections
 
 config = {
     "HOST": "localhost",
-    "PORT": 4008,
+    "PORT": 4095,
     "MAX_CONNS": 40,
-    "BUFFER_SIZE": 4092,  # max current_conns of bytes that can be received at once for http
+    "BUFFER_SIZE": 4092,  # max bytes that can be recieved
 }
 
 
@@ -29,6 +30,11 @@ config = {
 
 def main():
     global current_conns
+    cache = {}
+    cache_items = 0
+
+    # while check_socket(config['HOST'], config['PORT']) == False:
+    #     config['PORT'] += 1
 
     print("Proxy server running on port: " + str(config['PORT']))
 
@@ -46,7 +52,7 @@ def main():
         sys.exit(1)
 
     # set up client listeners
-    while current_conns <= config['MAX_CONNS']:
+    while True:
         # Check blacklist file for newly added blocked urls, dynamic blocking
         with open('blacklist.txt') as f:
             for entry in f:
@@ -60,16 +66,17 @@ def main():
             # create new socket object seperate from our currently listening socket above
             conn, addr = s.accept()
             # Create a new thread for new client
-            thread = threading.Thread(name=addr, target=proxyServer, args=(conn, addr))
+            thread = threading.Thread(name=addr, target=proxyServer, args=(conn, addr, cache, cache_items))
             thread.setDaemon(True)
             thread.start()
             print("Active threads: ", threading.active_count())
+        
 
 
 # Function: Handle requests to and from browser
 # Description: Deals with HTTP and HTTPS requests
 #              Checks for blocked URLS
-def proxyServer(conn, addr):
+def proxyServer(conn, addr, cache, cache_items):
     global current_conns
     data = conn.recv(config["BUFFER_SIZE"])  # get protocol of request from browser
     url_blocked = False
@@ -136,34 +143,49 @@ def proxyServer(conn, addr):
                                    [:webserver_pos - port_pos - 1])
                         webserver = temp[:port_pos]
 
-                    print("Connect to: ", webserver, port,  "\n")
+                    if protocol == 'http':
+                        try:
+                            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                            sock.connect((webserver, port)) # connect to webserver
+                            sock.send(data)
 
-                    # create new socket to connect to the web server
-                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    s.connect((webserver, port))
+                            # Check if request in cache
+                            if data in cache:
+                                print("Cache hit")
+                                cached_data = cache[data]
 
-                    if protocol == "http":
-                        s.send(data)  # send request to web server
-
-                        while True:
-                            try:
-                                server_data = s.recv(config["BUFFER_SIZE"])
-
-                            except socket.error:
-                                print("Connection timeout")
-                                s.close()
-                                conn.close()
-                                current_conns = current_conns - 1
-
-                            if (len(server_data) > 0):
-                                conn.send(server_data)  # send to browser
+                                if(len(cached_data)>0):
+                                    conn.send(cached_data)
+                                    print("HTTP request sent: ", url)
 
                             else:
+                                sock.send(data)
+                                while True:
+                                    server_data = sock.recv(config["BUFFER_SIZE"])
+                                    if (len(server_data)>0):
+                                        conn.send(server_data)
+                                        cache[data] = server_data
+                                        cache_items += 1
+                                        if(cache_items<20):
+                                            cache = {}
+                                            cache_items = 0
+                                        else:
+                                            break
+                            sock.close()
+                            conn.close()
+                            sys.exit(1)
+                        except socket.error:
+                            if sock:
+                                sock.close()
+                            if conn:
                                 conn.close()
-                                s.close()
-                                current_conns = current_conns - 1
+
+                        sys.exit(1)
+
 
                     if protocol == "https":
+                        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        s.connect((webserver, port))
                         # send response to the browser
                         conn.send(bytes("HTTP/1.1 200 Connection Established\r\n\r\n", "utf8"))
 
