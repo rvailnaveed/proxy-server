@@ -1,147 +1,232 @@
 import socket
-import threading
-import signal
 import sys
+import signal
+import threading
+import select
 
 
-config =  {
-            "HOST_NAME" : "0.0.0.0",
-            "BIND_PORT" : 12345,
-            "MAX_REQUEST_LEN" : 1024,
-            "CONNECTION_TIMEOUT" : 5
-          }
+def close_proxy(signal, frame):
+    print("Proxy server stopped")
+    sys.exit(0)
 
-def HTTP_request_he_to_she(http_request):
-    lines = http_request.split('\n')
-    index = False
-    text = ""
-    for i in range(len(lines)) :
-        if lines[i] == "" :
-            try :
-                index = i+1
-                text = lines[i+1]
-            except IndexError :
-                return False
+# Where the blocked sites are stored:
+blacklist = ["tcd.blackboard.com"]
+signal.signal(signal.SIGINT, close_proxy)
+current_conns = 0  # currently established connections
 
-        if "Content-Type: image" in lines[i] :
-            return False
-
-    text.replace(" he ", " she ")
-    print(text)
-    if index != False :
-        lines[index] = text
-    else :
-        return False
-    return lines
+config = {
+    "HOST": "localhost",
+    "PORT": 4095,
+    "MAX_CONNS": 40,
+    "BUFFER_SIZE": 4092,  # max bytes that can be recieved
+}
 
 
+# Function: Initialise program
+# Description: Creates sockets and binds and listens to the server
+#              Listens to the clients, accepting the connection and creating a new socket object
+#              Generates multi-threads for the connections and keeps of track of how many threads are active
+
+def main():
+    global current_conns
+    cache = {}
+    cache_items = 0
+
+    # while check_socket(config['HOST'], config['PORT']) == False:
+    #     config['PORT'] += 1
+
+    print("Proxy server running on port: " + str(config['PORT']))
+
+    try:
+        # create a TCP socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind((config['HOST'], config['PORT']))
+
+        # socket.listen() has a backlog parameter which specifies how many connections
+        # it will allow before refusing new ones.
+        s.listen(config['MAX_CONNS'])
+
+    except socket.error:
+        print("Socket error, run again to retry")
+        sys.exit(1)
+
+    # set up client listeners
+    while True:
+        # Check blacklist file for newly added blocked urls, dynamic blocking
+        with open('blacklist.txt') as f:
+            for entry in f:
+                 if entry not in blacklist and entry != '\n':
+                    entry.rstrip()
+                    blacklist.append(entry)
+        
+        if (current_conns < config['MAX_CONNS']):
+            current_conns += 1
+            # accept incoming connection
+            # create new socket object seperate from our currently listening socket above
+            conn, addr = s.accept()
+            # Create a new thread for new client
+            thread = threading.Thread(name=addr, target=proxyServer, args=(conn, addr, cache, cache_items))
+            thread.setDaemon(True)
+            thread.start()
+            print("Active threads: ", threading.active_count())
+        
 
 
-class Server:
-    """ The server class """
+# Function: Handle requests to and from browser
+# Description: Deals with HTTP and HTTPS requests
+#              Checks for blocked URLS
+def proxyServer(conn, addr, cache, cache_items):
+    global current_conns
+    data = conn.recv(config["BUFFER_SIZE"])  # get protocol of request from browser
+    url_blocked = False
+    empty = b''
 
-    def __init__(self, config):
-        signal.signal(signal.SIGINT, self.shutdown)     # Shutdown on Ctrl+C
-        self.serverSocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)             # Create a TCP socket
-        self.serverSocket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)    # Re-use the socket
-        self.serverSocket.bind((config['HOST_NAME'], config['BIND_PORT'])) # bind the socket to a public host, and a port
-        self.serverSocket.listen(10)    # become a server socket
-        self.__clients = {}
-
-
-
-    def listenForClient(self):
-        """ Wait for clients to connect """
-        while True:
-            (clientSocket, client_address) = self.serverSocket.accept()   # Establish the connection
-            d = threading.Thread(name=self._getClientName(client_address), target=self.proxy_thread, args=(clientSocket, client_address))
-            d.setDaemon(True)
-            d.start()
-        self.shutdown(0,0)
-
-
-    def proxy_thread(self, conn, client_addr):
-        """
-        *******************************************
-        *********** PROXY_THREAD FUNC *************
-          A thread to handle request from browser
-        *******************************************
-        """
-
-        request_from_browser = conn.recv(config['MAX_REQUEST_LEN'])        # get the request from browser
-        request_from_proxy = request_from_browser
-
-        first_line = request_from_browser.split('\n')[0]  
-        print("######################")
-        print(first_line[:50])
-        try :                 # parse the first line
-            url = first_line.split(' ')[1]   
-        except IndexError :
-            url = ""                     # get url
-        print(url[:50])
-        print("######################")
-        # find the webserver and port
-        http_pos = url.find("://")          # find pos of ://
-        if (http_pos==-1):
-            temp = url
-        else:
-            temp = url[(http_pos+3):]       # get the rest of url
-
-        port_pos = temp.find(":")           # find the port pos (if any)
-
-        # find end of web server
-        webserver_pos = temp.find("/")
-        if webserver_pos == -1:
-            webserver_pos = len(temp)
-
-        webserver = ""
-        port = -1
-        if (port_pos==-1 or webserver_pos < port_pos):      # default port
-            port = 80
-            webserver = temp[:webserver_pos]
-        else:                                               # specific port
-            port = int((temp[(port_pos+1):])[:webserver_pos-port_pos-1])
-            webserver = temp[:port_pos]
-
+# Code below was adapted from geeksforgeeks.org to support:
+#                                                             -> HTTP + HTTPS
+#                                                             -> Dynamic blocking of URL's
+#                                                             -> Caching
+    if data is not empty:
         try:
-            # create a socket to connect to the web server
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(config['CONNECTION_TIMEOUT'])
-            s.connect((webserver, port))
-            s.sendall(request_from_proxy)                           # send request to webserver
+            parse_line = data.decode().split('\n')[0]  # parse the first line
 
-            while 1:
-                data_from_server = s.recv(config['MAX_REQUEST_LEN'])          # receive data from web server
-                data_from_proxy = data_from_server
-                #HTTP_request_he_to_she(data_from_proxy)
-                if (len(data_from_proxy) > 0):
-                    conn.send(data_from_proxy)                               # send to browser
+            try:
+                url = parse_line.split(' ')[1]  # get URL
+                protocol = ""
+
+                if "CONNECT" in parse_line: # The CONNECT keyword passed by the browser indicates HTTPS
+                    protocol = "https"
+
                 else:
-                    break
-            s.close()
-            conn.close()
-        except socket.error as error_msg:
-            print('ERROR: ',client_addr,error_msg)
-            if s:
-                s.close()
-            if conn:
-                conn.close()
+                    protocol = "http"
+
+                # Check if URL is blacklisted
+                for i in range(0, len(blacklist)):  # check if site is already blocked
+                    if blacklist[i] in url:
+                        print("Blocked URL site: " + url + "\n")
+                        url_blocked = True
+                        conn.close()
+
+                if url_blocked is False:
+                    print("Request: ", parse_line, addr)
+
+                    # copy of url
+                    http_pos = url.find("://")
+
+                    if (http_pos == -1):
+                        temp = url
+
+                    elif (protocol == "http"):
+                        temp = url[(http_pos + 3):]
+
+                    else:
+                        temp = url[(http_pos + 4):]
+
+                    # find webserver
+                    port_pos = temp.find(":") # port pos (if any)
+
+                    webserver_pos = temp.find("/")
+                    if webserver_pos == -1:
+                        webserver_pos = len(temp)
+
+                    webserver = ""
+                    port = -1
+
+                    if (port_pos == -1 or webserver_pos < port_pos):
+                        if (protocol == "https"):
+                            port = 443
+                        else:
+                            port = 80
+                        webserver = temp[:webserver_pos]
+                    else:
+                        port = int((temp[(port_pos + 1):])
+                                   [:webserver_pos - port_pos - 1])
+                        webserver = temp[:port_pos]
+
+                    if protocol == 'http':
+                        try:
+                            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                            sock.connect((webserver, port)) # connect to webserver
+                            sock.send(data)
+
+                            # Check if request in cache
+                            if data in cache:
+                                print("Cache hit")
+                                cached_data = cache[data]
+
+                                if(len(cached_data)>0):
+                                    conn.send(cached_data)
+                                    print("HTTP request sent: ", url)
+
+                            else:
+                                sock.send(data)
+                                while True:
+                                    server_data = sock.recv(config["BUFFER_SIZE"])
+                                    if (len(server_data)>0):
+                                        conn.send(server_data)
+                                        cache[data] = server_data
+                                        cache_items += 1
+                                        if(cache_items<20):
+                                            cache = {}
+                                            cache_items = 0
+                                        else:
+                                            break
+                            sock.close()
+                            conn.close()
+                            sys.exit(1)
+                        except socket.error:
+                            if sock:
+                                sock.close()
+                            if conn:
+                                conn.close()
+
+                        sys.exit(1)
 
 
-    def _getClientName(self, cli_addr):
-        """ Return the clientName.
-        """
-        return "Client"
+                    if protocol == "https":
+                        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        s.connect((webserver, port))
+                        # send response to the browser
+                        conn.send(bytes("HTTP/1.1 200 Connection Established\r\n\r\n", "utf8"))
+
+                        # store both sockets: browser and server
+                        connections = [conn, s]
+                        keep_alive = True
+
+                        while keep_alive:
+                            keep_alive = False
+                            ready_sockets, sockets_for_writing, error_sockets = select.select(connections, [], connections, 100)
+
+                            if error_sockets:
+                                break
+
+                            for r_socket in ready_sockets:
+                                # look for a ready socket
+                                other = connections[1] if r_socket is connections[0] else connections[0]
+
+                                try:
+                                    # buffer size for HTTPS
+                                    data = r_socket.recv(8192)
+
+                                except socket.error:                   
+                                    print("Connection timeout")
+                                    r_socket.close()
+
+                                if data:
+                                    other.sendall(data)
+                                    keep_alive = True
+                    else:
+                        pass
+            except IndexError:
+                pass
+        except UnicodeDecodeError:
+            pass
+    else:
+        pass
+
+    current_conns = current_conns - 1
+    conn.close()         
 
 
-    def shutdown(self, signum, frame):
-        """ Handle the exiting server. Clean all traces """
-        self.serverSocket.close()
-        sys.exit(0)
 
-
-if __name__ == "__main__":
-    print("the program is starting")
-    server = Server(config)
-    
-    server.listenForClient()
+if __name__ == '__main__':
+    main()
