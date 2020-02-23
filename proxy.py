@@ -22,11 +22,9 @@ config = {
 }
 
 
-# Function: Initialise program
-# Description: Creates sockets and binds and listens to the server
-#              Listens to the clients, accepting the connection and creating a new socket object
-#              Generates multi-threads for the connections and keeps of track of how many threads are active
-
+# Create Socket objects and bind to port
+# Add thread for each request
+# initialise cache
 def main():
     global current_conns
     cache = {}
@@ -72,9 +70,7 @@ def main():
         
 
 
-# Function: Handle requests to and from browser
-# Description: Deals with HTTP and HTTPS requests
-#              Checks for blocked URLS
+# Request Handler
 def proxyServer(conn, addr, cache, cache_items):
     global current_conns
     data = conn.recv(config["BUFFER_SIZE"])  # get protocol of request from browser
