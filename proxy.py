@@ -30,9 +30,6 @@ def main():
     cache = {}
     cache_items = 0
 
-    # while check_socket(config['HOST'], config['PORT']) == False:
-    #     config['PORT'] += 1
-
     print("Proxy server running on port: " + str(config['PORT']))
 
     try:
@@ -98,7 +95,7 @@ def proxyServer(conn, addr, cache, cache_items):
                 # Check if URL is blacklisted
                 for i in range(0, len(blacklist)):  # check if site is already blocked
                     if blacklist[i] in url:
-                        print("Blocked URL site: " + url + "\n")
+                        print("Blocked URL: " + url + "\n")
                         url_blocked = True
                         conn.close()
 
